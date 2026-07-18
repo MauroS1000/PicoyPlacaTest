@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: mauro101/picoyplaca-frontend:placeholder  # <--- El pipeline cambiará esto por el commit hash
+        image: mauro101/picoyplaca-frontend:f1e3945
         ports:
         - containerPort: 80
 ---
