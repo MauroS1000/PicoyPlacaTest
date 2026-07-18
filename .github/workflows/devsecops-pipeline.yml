@@ -59,10 +59,18 @@ jobs:
   package-and-push:
     needs: security-sast
     runs-on: ubuntu-latest
+    outputs:
+      sha_short: ${{ steps.vars.outputs.sha_short }}
     steps:
       - name: Clonar el repositorio
         uses: actions/checkout@v4
 
+      # Sacamos el hash corto para reusarlo como tag
+      - name: Definir variables de entorno
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+       Blanco de autenticación en Docker Hub
       - name: Autenticación en Docker Hub
         uses: docker/login-action@v3
         with:
@@ -74,52 +82,45 @@ jobs:
         with:
           context: ./picoyplaca
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/picoyplaca-backend:latest
+          tags: |
+            mauro101/picoyplaca-backend:${{ steps.vars.outputs.sha_short }}
+            mauro101/picoyplaca-backend:latest
 
       - name: Construir y Subir Imagen Docker - Frontend
         uses: docker/build-push-action@v5
         with:
           context: ./pico-placa-frontend
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/picoyplaca-frontend:latest
+          tags: |
+            mauro101/picoyplaca-frontend:${{ steps.vars.outputs.sha_short }}
+            mauro101/picoyplaca-frontend:latest
 
-  # 4 y 5. DESPLIEGUE CONTINUO Y ANÁLISIS DAST (Unificados)
-  deploy-and-dast:
+  # 4. ACTUALIZACIÓN GITOPS PARA ARGOCD
+  gitops-update:
     needs: package-and-push
     runs-on: ubuntu-latest
     permissions:
-      issues: write
-      contents: read
+      contents: write
     steps:
       - name: Clonar el repositorio
         uses: actions/checkout@v4
-
-      - name: Configurar Clúster Kubernetes Local
-        uses: engineerd/setup-kind@v0.5.0
         with:
-          version: "v0.11.1"
+          fetch-depth: 0
 
-      - name: Desplegar Manifiestos y Configurar Red
+      - name: Configurar credenciales de Git
         run: |
-          sed -i 's/tu-usuario-docker/${{ secrets.DOCKER_USERNAME }}/g' k8s/backend-k8s.yaml
-          sed -i 's/tu-usuario-docker/${{ secrets.DOCKER_USERNAME }}/g' k8s/frontend-k8s.yaml
-          
-          kubectl apply -f k8s/backend-k8s.yaml
-          kubectl apply -f k8s/frontend-k8s.yaml
-          
-          echo "Esperando inicialización de contenedores..."
-          kubectl rollout status deployment/picoyplaca-backend --timeout=120s
-          kubectl rollout status deployment/picoyplaca-frontend --timeout=120s
-          
-          echo "Habilitando port-forwarding para el escáner DAST..."
-          kubectl port-forward svc/picoyplaca-frontend-service 30080:80 &
-          sleep 10
-          
-          echo "Ajustando permisos para el reporte de ZAP..."
-          chmod 777 . 
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Escaneo Dinámico DAST con OWASP ZAP (Baseline Scan)
-        uses: zaproxy/action-baseline@v0.15.0
-        with:
-          target: 'http://localhost:30080'
-          fail_action: false
+      - name: Actualizar tags en los manifiestos de K8s
+        run: |
+          # Reemplaza cualquier tag viejo o el 'placeholder' por el hash corto generado en la etapa anterior
+          sed -i "s|image: mauro101/picoyplaca-backend:.*|image: mauro101/picoyplaca-backend:${{ needs.package-and-push.outputs.sha_short }}|g" k8s/backend-k8s.yaml
+          sed -i "s|image: mauro101/picoyplaca-frontend:.*|image: mauro101/picoyplaca-frontend:${{ needs.package-and-push.outputs.sha_short }}|g" k8s/frontend-k8s.yaml
+
+      - name: Subir cambios al repositorio de Git
+        run: |
+          git add k8s/*.yaml
+          # Solo hace commit si de verdad cambió el hash (evita romper el pipeline si redespliegas lo mismo)
+          git diff-index --quiet HEAD || git commit -m "chore(gitops): actualizar imágenes al commit ${{ needs.package-and-push.outputs.sha_short }}"
+          git push origin HEAD:${{ github.ref_name }}
